@@ -9,6 +9,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.summarization_config import SummarizationConfig
+from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, setup_agent
 
 
 def _make_app_config(models: list[ModelConfig]) -> AppConfig:
@@ -108,6 +109,44 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
     assert captured["name"] == "safe-model"
     assert captured["thinking_enabled"] is False
     assert result["model"] is not None
+
+
+def test_make_lead_agent_bootstrap_uses_minimal_tools(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    # Bootstrap flow should not resolve full toolset from config.
+    monkeypatch.setattr(
+        tools_module,
+        "get_available_tools",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("get_available_tools should not be called in bootstrap mode")),
+    )
+    monkeypatch.setattr(lead_agent_module, "_build_middlewares", lambda config, model_name, agent_name=None: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        lead_agent_module,
+        "create_agent",
+        lambda **kwargs: captured.update(kwargs) or kwargs,
+    )
+
+    lead_agent_module.make_lead_agent(
+        {
+            "configurable": {
+                "model_name": "safe-model",
+                "thinking_enabled": False,
+                "is_plan_mode": False,
+                "subagent_enabled": False,
+                "is_bootstrap": True,
+                "agent_name": "code-reviewer",
+            }
+        }
+    )
+
+    assert captured["tools"] == [ask_clarification_tool, present_file_tool, setup_agent]
 
 
 def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):

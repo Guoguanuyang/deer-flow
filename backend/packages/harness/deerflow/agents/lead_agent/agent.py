@@ -268,7 +268,7 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 def make_lead_agent(config: RunnableConfig):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
-    from deerflow.tools.builtins import setup_agent
+    from deerflow.tools.builtins import ask_clarification_tool, present_file_tool, setup_agent
 
     cfg = config.get("configurable", {})
 
@@ -324,10 +324,16 @@ def make_lead_agent(config: RunnableConfig):
     )
 
     if is_bootstrap:
-        # Special bootstrap agent with minimal prompt for initial custom agent creation flow
+        # Bootstrap flow should not expose broad filesystem tools. Keep tool surface
+        # minimal so SOUL creation always goes through setup_agent into agents/<name>/.
+        bootstrap_tools = [
+            ask_clarification_tool,
+            present_file_tool,
+            setup_agent,
+        ]
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
+            tools=bootstrap_tools,
             middleware=_build_middlewares(config, model_name=model_name),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
             state_schema=ThreadState,
