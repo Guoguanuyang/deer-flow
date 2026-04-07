@@ -27,10 +27,15 @@ for arg in "$@"; do
     esac
 done
 
+PNPM_BIN="pnpm"
+if command -v pnpm.cmd >/dev/null 2>&1; then
+    PNPM_BIN="pnpm.cmd"
+fi
+
 if $DEV_MODE; then
-    FRONTEND_CMD="pnpm run dev"
+    FRONTEND_CMD="$PNPM_BIN run dev"
 else
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(16))') $PNPM_BIN run preview"
 fi
 
 # ── Stop existing services ────────────────────────────────────────────────────

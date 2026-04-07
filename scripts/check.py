@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,9 @@ from typing import Optional
 
 def run_command(command: list[str]) -> Optional[str]:
     """Run a command and return trimmed stdout, or None on failure."""
+    resolved = shutil.which(command[0])
+    if sys.platform == "win32" and resolved and Path(resolved).suffix.lower() in {".cmd", ".bat"}:
+        command = ["cmd", "/c", *command]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, shell=False)
     except (OSError, subprocess.CalledProcessError):
