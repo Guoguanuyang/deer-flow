@@ -54,3 +54,12 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+
+# Understand-Anything plugin (cloned for Cursor auto-discovery via .cursor-plugin/plugin.json)
+Understand-Anything/
+docs/feishu-internal-agent-invocation.md
+docs/deerflow-skill-subagent-architecture.md
+docs/agent-runtime-relationship.md
+docs/sandbox-architecture.md
+scripts/test-start-dev.ps1
+start-dev.cmd
