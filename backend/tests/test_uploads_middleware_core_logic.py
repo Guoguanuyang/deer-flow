@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 THREAD_ID = "thread-abc123"
 
@@ -34,7 +35,9 @@ def _runtime(thread_id: str | None = THREAD_ID) -> MagicMock:
 
 
 def _uploads_dir(tmp_path: Path, thread_id: str = THREAD_ID) -> Path:
-    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id)
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -256,8 +259,26 @@ class TestBeforeAgent:
 
         assert result is not None
         updated_msg = result["messages"][-1]
-        assert "<uploaded_files>" in updated_msg.content
-        assert "analyse this" in updated_msg.content
+        assert isinstance(updated_msg.content, list)
+        combined_text = "\n".join(block.get("text", "") for block in updated_msg.content if isinstance(block, dict))
+        assert "<uploaded_files>" in combined_text
+        assert "analyse this" in combined_text
+
+    def test_list_content_preserves_original_slash_skill_text(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.csv").write_bytes(b"a,b")
+
+        msg = _human(
+            [{"type": "text", "text": "/data-analysis analyze data.csv"}],
+            files=[{"filename": "data.csv", "size": 3, "path": "/mnt/user-data/uploads/data.csv"}],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert isinstance(updated_msg.content, list)
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis analyze data.csv"
 
     def test_preserves_additional_kwargs_on_updated_message(self, tmp_path):
         mw = _middleware(tmp_path)
@@ -274,6 +295,37 @@ class TestBeforeAgent:
         assert updated_kwargs.get("files") == files_meta
         assert updated_kwargs.get("element") == "task"
 
+    def test_preserves_original_user_content_before_upload_context(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+
+        msg = _human(
+            "/data-analysis 分析这个文档",
+            files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert updated_msg.content.startswith("<uploaded_files>")
+        assert updated_msg.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis 分析这个文档"
+
+    def test_preserves_existing_original_user_content_marker(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+
+        msg = _human(
+            "<uploaded_files>\nold\n</uploaded_files>\n\n/data-analysis run",
+            files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf"}],
+            **{ORIGINAL_USER_CONTENT_KEY: "/data-analysis run"},
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        assert result["messages"][-1].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/data-analysis run"
+
     def test_uploaded_files_returned_in_state_update(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)
@@ -289,6 +341,8 @@ class TestBeforeAgent:
                 "size": 5,
                 "path": "/mnt/user-data/uploads/notes.txt",
                 "extension": ".txt",
+                "outline": [],
+                "outline_preview": [],
             }
         ]
 
@@ -339,3 +393,130 @@ class TestBeforeAgent:
         result = mw.before_agent(self._state(msg), _runtime())
 
         assert result["messages"][-1].id == "original-id-42"
+
+    def test_outline_injected_when_md_file_exists(self, tmp_path):
+        """When a converted .md file exists alongside the upload, its outline is injected."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF fake")
+        # Simulate the .md produced by the conversion pipeline
+        (uploads_dir / "report.md").write_text(
+            "# PART I\n\n## ITEM 1. BUSINESS\n\nBody text.\n\n## ITEM 2. RISK\n",
+            encoding="utf-8",
+        )
+
+        msg = _human("summarise", files=[{"filename": "report.pdf", "size": 9, "path": "/mnt/user-data/uploads/report.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Document outline" in content
+        assert "PART I" in content
+        assert "ITEM 1. BUSINESS" in content
+        assert "ITEM 2. RISK" in content
+        assert "read_file" in content
+
+    def test_no_outline_when_no_md_file(self, tmp_path):
+        """Files without a sibling .md have no outline section."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.xlsx").write_bytes(b"fake-xlsx")
+
+        msg = _human("analyse", files=[{"filename": "data.xlsx", "size": 9, "path": "/mnt/user-data/uploads/data.xlsx"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Document outline" not in content
+
+    def test_outline_truncation_hint_shown(self, tmp_path):
+        """When outline is truncated, a hint line is appended after the last visible entry."""
+        from deerflow.utils.file_conversion import MAX_OUTLINE_ENTRIES
+
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "big.pdf").write_bytes(b"%PDF fake")
+        # Write MAX_OUTLINE_ENTRIES + 5 headings so truncation is triggered
+        headings = "\n".join(f"# Heading {i}" for i in range(MAX_OUTLINE_ENTRIES + 5))
+        (uploads_dir / "big.md").write_text(headings, encoding="utf-8")
+
+        msg = _human("read", files=[{"filename": "big.pdf", "size": 9, "path": "/mnt/user-data/uploads/big.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert f"showing first {MAX_OUTLINE_ENTRIES} headings" in content
+        assert "use `read_file` to explore further" in content
+
+    def test_no_truncation_hint_for_short_outline(self, tmp_path):
+        """Short outlines (under the cap) must not show a truncation hint."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "short.pdf").write_bytes(b"%PDF fake")
+        (uploads_dir / "short.md").write_text("# Intro\n\n# Conclusion\n", encoding="utf-8")
+
+        msg = _human("read", files=[{"filename": "short.pdf", "size": 9, "path": "/mnt/user-data/uploads/short.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "showing first" not in content
+
+    def test_historical_file_outline_injected(self, tmp_path):
+        """Outline is also shown for historical (previously uploaded) files."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        # Historical file with .md
+        (uploads_dir / "old_report.pdf").write_bytes(b"%PDF old")
+        (uploads_dir / "old_report.md").write_text(
+            "# Chapter 1\n\n# Chapter 2\n",
+            encoding="utf-8",
+        )
+        # New file without .md
+        (uploads_dir / "new.txt").write_bytes(b"new")
+
+        msg = _human("go", files=[{"filename": "new.txt", "size": 3, "path": "/mnt/user-data/uploads/new.txt"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Chapter 1" in content
+        assert "Chapter 2" in content
+
+    def test_fallback_preview_shown_when_outline_empty(self, tmp_path):
+        """When .md exists but has no headings, first lines are shown as a preview."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF fake")
+        # .md with no # headings — plain prose only
+        (uploads_dir / "report.md").write_text(
+            "Annual Financial Report 2024\n\nThis document summarises key findings.\n\nRevenue grew by 12%.\n",
+            encoding="utf-8",
+        )
+
+        msg = _human("analyse", files=[{"filename": "report.pdf", "size": 9, "path": "/mnt/user-data/uploads/report.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        # Outline section must NOT appear
+        assert "Document outline" not in content
+        # Preview lines must appear
+        assert "Annual Financial Report 2024" in content
+        assert "No structural headings detected" in content
+        # grep hint must appear
+        assert "grep" in content
+
+    def test_fallback_grep_hint_shown_when_no_md_file(self, tmp_path):
+        """Files with no sibling .md still get the grep hint (outline is empty)."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "data.csv").write_bytes(b"a,b,c\n1,2,3\n")
+
+        msg = _human("analyse", files=[{"filename": "data.csv", "size": 12, "path": "/mnt/user-data/uploads/data.csv"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Document outline" not in content
+        assert "grep" in content

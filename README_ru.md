@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Русский
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | Русский
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -60,6 +60,7 @@ DeerFlow интегрирован с инструментарием для ум�
       - [Режим Sandbox](#режим-sandbox)
       - [MCP-сервер](#mcp-сервер)
       - [Мессенджеры](#мессенджеры)
+      - [Трассировка LangSmith](#трассировка-langsmith)
   - [От Deep Research к Super Agent Harness](#от-deep-research-к-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills & Tools](#skills--tools)
@@ -255,6 +256,7 @@ DeerFlow принимает задачи прямо из мессенджеро�
 | Telegram | Bot API (long-polling) | Просто |
 | Slack | Socket Mode | Средне |
 | Feishu / Lark | WebSocket | Средне |
+| DingTalk | Stream Push (WebSocket) | Средне |
 
 **Конфигурация в `config.yaml`:**
 
@@ -264,6 +266,8 @@ channels:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
+    # domain: https://open.feishu.cn       # China (default)
+    # domain: https://open.larksuite.com   # International
 
   slack:
     enabled: true
@@ -275,12 +279,26 @@ channels:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
     allowed_users: []
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # ClientId с DingTalk Open Platform
+    client_secret: $DINGTALK_CLIENT_SECRET     # ClientSecret с DingTalk Open Platform
+    allowed_users: []                          # пусто = разрешить всем
+    card_template_id: ""                       # Опционально: ID шаблона AI Card для потокового эффекта печатной машинки
 ```
 
 **Настройка Telegram**
 
 1. Напишите [@BotFather](https://t.me/BotFather), отправьте `/newbot` и скопируйте HTTP API-токен.
 2. Укажите `TELEGRAM_BOT_TOKEN` в `.env` и включите канал в `config.yaml`.
+
+**Настройка DingTalk**
+
+1. Создайте приложение на [DingTalk Open Platform](https://open.dingtalk.com/) и включите возможность **Робот**.
+2. На странице настроек робота установите режим приёма сообщений на **Stream**.
+3. Скопируйте `Client ID` и `Client Secret`. Укажите `DINGTALK_CLIENT_ID` и `DINGTALK_CLIENT_SECRET` в `.env` и включите канал в `config.yaml`.
+4. *(Опционально)* Для включения потоковых ответов AI Card (эффект печатной машинки) создайте шаблон **AI Card** на [платформе карточек DingTalk](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), затем укажите `card_template_id` в `config.yaml` с ID шаблона. Также необходимо запросить разрешения `Card.Streaming.Write` и `Card.Instance.Write`.
 
 **Доступные команды**
 
@@ -293,6 +311,22 @@ channels:
 | `/help` | Показать справку |
 
 > Сообщения без команды воспринимаются как обычный чат — DeerFlow создаёт тред и отвечает.
+
+#### Трассировка LangSmith
+
+DeerFlow имеет встроенную интеграцию с [LangSmith](https://smith.langchain.com) для наблюдаемости. При включении все вызовы LLM, запуски агентов и выполнения инструментов отслеживаются и отображаются в дашборде LangSmith.
+
+Добавьте в файл `.env` в корне проекта:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=deer-flow
+```
+
+`LANGSMITH_ENDPOINT` по умолчанию `https://api.smith.langchain.com` и может быть переопределён при необходимости. Устаревшие переменные `LANGCHAIN_*` (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY` и т.д.) также поддерживаются для обратной совместимости; `LANGSMITH_*` имеет приоритет, когда заданы обе.
+
+В Docker-развёртываниях трассировка отключена по умолчанию. Установите `LANGSMITH_TRACING=true` и `LANGSMITH_API_KEY` в `.env` для включения.
 
 ## От Deep Research к Super Agent Harness
 

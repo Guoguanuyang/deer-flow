@@ -2,6 +2,7 @@ import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
 import type { AgentThreadState } from "../threads";
 
+import { buildWriteFileDraftContent } from "./preview";
 import { urlOfArtifact } from "./utils";
 
 export async function loadArtifactContent({
@@ -20,7 +21,7 @@ export async function loadArtifactContent({
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = await fetch(url);
   const text = await response.text();
-  return text;
+  return { content: text, url };
 }
 
 export function loadArtifactContentFromToolCall({
@@ -30,6 +31,14 @@ export function loadArtifactContentFromToolCall({
   url: string;
   thread: BaseStream<AgentThreadState>;
 }) {
+  const draftContent = buildWriteFileDraftContent({
+    filepath: urlString,
+    messages: thread.messages,
+  });
+  if (draftContent !== undefined) {
+    return draftContent;
+  }
+
   const url = new URL(urlString);
   const toolCallId = url.searchParams.get("tool_call_id");
   const messageId = url.searchParams.get("message_id");

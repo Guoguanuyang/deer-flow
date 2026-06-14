@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md)
+[English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -40,12 +40,14 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
   - [快速开始](#快速开始)
     - [配置](#配置)
     - [运行应用](#运行应用)
+      - [部署建议与资源规划](#部署建议与资源规划)
       - [方式一：Docker（推荐）](#方式一docker推荐)
       - [方式二：本地开发](#方式二本地开发)
     - [进阶配置](#进阶配置)
       - [Sandbox 模式](#sandbox-模式)
       - [MCP Server](#mcp-server)
       - [IM 渠道](#im-渠道)
+      - [LangSmith 链路追踪](#langsmith-链路追踪)
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
@@ -149,6 +151,20 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ### 运行应用
 
+#### 部署建议与资源规划
+
+可以先按下面的资源档位来选择 DeerFlow 的运行方式：
+
+| 部署场景 | 起步配置 | 推荐配置 | 说明 |
+|---------|-----------|------------|-------|
+| 本地体验 / `make dev` | 4 vCPU、8 GB 内存、20 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 适合单个开发者或单个轻量会话，且模型走外部 API。`2 核 / 4 GB` 通常跑不稳。 |
+| Docker 开发 / `make docker-start` | 4 vCPU、8 GB 内存、25 GB SSD 可用空间 | 8 vCPU、16 GB 内存 | 镜像构建、源码挂载和 sandbox 容器都会比纯本地模式更吃资源。 |
+| 长期运行服务 / `make up` | 8 vCPU、16 GB 内存、40 GB SSD 可用空间 | 16 vCPU、32 GB 内存 | 更适合共享环境、多 agent 任务、报告生成或更重的 sandbox 负载。 |
+
+- 上面的配置只覆盖 DeerFlow 本身；如果你还要本机部署本地大模型，请单独为模型服务预留资源。
+- 持续运行的服务更推荐使用 Linux + Docker。macOS 和 Windows 更适合作为开发机或体验环境。
+- 如果 CPU 或内存长期打满，先降低并发会话或重任务数量，再考虑升级到更高一档配置。
+
 #### 方式一：Docker（推荐）
 
 **开发模式**（支持热更新，挂载源码）：
@@ -168,7 +184,7 @@ make down   # 停止并移除容器
 ```
 
 > [!NOTE]
-> 当前 LangGraph agent server 通过开源 CLI 服务 `langgraph dev` 运行。
+> 当前 Agent 运行时嵌入在 Gateway 中运行，`/api/langgraph/*` 会由 nginx 重写到 Gateway 的 LangGraph-compatible API。
 
 访问地址：http://localhost:2026
 
@@ -178,7 +194,8 @@ make down   # 停止并移除容器
 
 如果你更希望直接在本地启动各个服务：
 
-前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`，也可以通过 `DEER_FLOW_CONFIG_PATH` 覆盖。
+前提：先完成上面的“配置”步骤（`make config` 和模型 API key 配置）。`make dev` 需要有效配置文件，默认读取项目根目录下的 `config.yaml`。可以用 `DEER_FLOW_PROJECT_ROOT` 显式指定项目根目录，也可以用 `DEER_FLOW_CONFIG_PATH` 指向某个具体配置文件。运行期状态默认写到项目根目录下的 `.deer-flow`，可用 `DEER_FLOW_HOME` 覆盖；skills 默认读取项目根目录下的 `skills/`，可用 `DEER_FLOW_SKILLS_PATH` 覆盖。
+在 Windows 上，请使用 Git Bash 运行本地开发流程。基于 bash 的服务脚本不支持直接在原生 `cmd.exe` 或 PowerShell 中执行，且 WSL 也不保证可用，因为部分脚本依赖 Git for Windows 的 `cygpath` 等工具。
 
 1. **检查依赖环境**：
    ```bash
@@ -230,19 +247,21 @@ DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应�
 | Telegram | Bot API（long-polling） | 简单 |
 | Slack | Socket Mode | 中等 |
 | Feishu / Lark | WebSocket | 中等 |
+| 企业微信智能机器人 | WebSocket | 中等 |
+| 钉钉 | Stream Push（WebSocket） | 中等 |
 
 **`config.yaml` 中的配置示例：**
 
 ```yaml
 channels:
-  # LangGraph Server URL（默认：http://localhost:2024）
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL（默认：http://localhost:8001/api）
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL（默认：http://localhost:8001）
   gateway_url: http://localhost:8001
 
   # 可选：所有移动端渠道共用的全局 session 默认值
   session:
-    assistant_id: lead_agent
+    assistant_id: lead_agent  # 也可以填自定义 agent 名；渠道层会自动转换为 lead_agent + agent_name
     config:
       recursion_limit: 100
     context:
@@ -254,6 +273,13 @@ channels:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
+    # domain: https://open.feishu.cn       # 国内版（默认）
+    # domain: https://open.larksuite.com   # 国际版
+
+  wecom:
+    enabled: true
+    bot_id: $WECOM_BOT_ID
+    bot_secret: $WECOM_BOT_SECRET
 
   slack:
     enabled: true
@@ -268,18 +294,29 @@ channels:
 
     # 可选：按渠道 / 按用户单独覆盖 session 配置
     session:
-      assistant_id: mobile_agent
+      assistant_id: mobile-agent  # 这里同样支持自定义 agent 名
       context:
         thinking_enabled: false
       users:
         "123456789":
-          assistant_id: vip_agent
+          assistant_id: vip-agent
           config:
             recursion_limit: 150
           context:
             thinking_enabled: true
             subagent_enabled: true
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # 钉钉开放平台 ClientId
+    client_secret: $DINGTALK_CLIENT_SECRET     # 钉钉开放平台 ClientSecret
+    allowed_users: []                          # 留空表示允许所有人
+    card_template_id: ""                       # 可选：AI 卡片模板 ID，用于流式打字机效果
 ```
+
+说明：
+- `assistant_id: lead_agent` 会直接调用默认的 LangGraph assistant。
+- 如果 `assistant_id` 填的是自定义 agent 名，DeerFlow 仍然会走 `lead_agent`，同时把该值注入为 `agent_name`，这样 IM 渠道也会生效对应 agent 的 SOUL 和配置。
 
 在 `.env` 里设置对应的 API key：
 
@@ -294,6 +331,14 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# 企业微信智能机器人
+WECOM_BOT_ID=your_bot_id
+WECOM_BOT_SECRET=your_bot_secret
+
+# 钉钉
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Telegram 配置**
@@ -316,6 +361,21 @@ FEISHU_APP_SECRET=your_app_secret
 3. 在 **事件订阅** 中订阅 `im.message.receive_v1`，连接方式选择 **长连接**。
 4. 复制 App ID 和 App Secret，在 `.env` 中设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，并在 `config.yaml` 中启用该渠道。
 
+**企业微信智能机器人配置**
+
+1. 在企业微信智能机器人平台创建机器人，获取 `bot_id` 和 `bot_secret`。
+2. 在 `config.yaml` 中启用 `channels.wecom`，并填入 `bot_id` / `bot_secret`。
+3. 在 `.env` 中设置 `WECOM_BOT_ID` 和 `WECOM_BOT_SECRET`。
+4. 安装后端依赖时确保包含 `wecom-aibot-python-sdk`，渠道会通过 WebSocket 长连接接收消息，无需公网回调地址。
+5. 当前支持文本、图片和文件入站消息；agent 生成的最终图片/文件也会回传到企业微信会话中。
+
+**钉钉配置**
+
+1. 在 [钉钉开放平台](https://open.dingtalk.com/) 创建应用，并启用 **机器人** 能力。
+2. 在机器人配置页面设置消息接收模式为 **Stream模式**。
+3. 复制 `Client ID` 和 `Client Secret`，在 `.env` 中设置 `DINGTALK_CLIENT_ID` 和 `DINGTALK_CLIENT_SECRET`，并在 `config.yaml` 中启用该渠道。
+4. *（可选）* 如需开启流式 AI 卡片回复（打字机效果），请在[钉钉卡片平台](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card)创建 **AI 卡片**模板，然后在 `config.yaml` 中将 `card_template_id` 设为该模板 ID。同时需要申请 `Card.Streaming.Write` 和 `Card.Instance.Write` 权限。
+
 **命令**
 
 渠道连接完成后，你可以直接在聊天窗口里和 DeerFlow 交互：
@@ -329,6 +389,21 @@ FEISHU_APP_SECRET=your_app_secret
 | `/help` | 查看帮助 |
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
+
+#### LangSmith 链路追踪
+
+DeerFlow 内置了 [LangSmith](https://smith.langchain.com) 集成，用于可观测性。启用后，所有 LLM 调用、agent 运行和工具执行都会被追踪，并在 LangSmith 仪表盘中展示。
+
+在 `.env` 文件中添加以下配置：
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+Docker 部署时，追踪默认关闭。在 `.env` 中设置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 即可启用。
 
 ## 从 Deep Research 到 Super Agent Harness
 
@@ -489,7 +564,7 @@ DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关�
 
 ### 安全使用建议
 
-**注意：建议您将 DeerFlow 部署在本地可信的网络环境下。**若您有跨设备、跨网络的部署需求，必须加入严格的安全措施。例如，采取如下手段：
+**注意：建议您将 DeerFlow 部署在本地可信的网络环境下。** 若您有跨设备、跨网络的部署需求，必须加入严格的安全措施。例如，采取如下手段：
 
 - **设置访问 IP 白名单**：使用 `iptables`，或部署硬件防火墙 / 带访问控制（ACL）功能的交换机等，**配置规则设置 IP 白名单**，拒绝其他所有 IP 进行访问。
 - **前置身份验证**：配置反向代理（nginx 等），并**开启高强度的前置身份验证功能**，禁止无任何身份验证的访问。

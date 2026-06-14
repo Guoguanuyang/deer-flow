@@ -7,7 +7,10 @@ import {
   MessageResponse,
   type MessageResponseProps,
 } from "@/components/ai-elements/message";
-import { streamdownPlugins } from "@/core/streamdown";
+import {
+  preprocessStreamdownMarkdown,
+  streamdownPlugins,
+} from "@/core/streamdown";
 import { cn } from "@/lib/utils";
 
 import { CitationLink } from "../citations/citation-link";
@@ -33,6 +36,10 @@ export function MarkdownContent({
   remarkPlugins = streamdownPlugins.remarkPlugins,
   components: componentsFromProps,
 }: MarkdownContentProps) {
+  const normalizedContent = useMemo(
+    () => preprocessStreamdownMarkdown(content),
+    [content],
+  );
   const components = useMemo(() => {
     return {
       a: (props: AnchorHTMLAttributes<HTMLAnchorElement>) => {
@@ -48,7 +55,10 @@ export function MarkdownContent({
         return (
           <a
             {...rest}
-            className={cn("text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/60 transition-colors", className)}
+            className={cn(
+              "text-primary decoration-primary/30 hover:decoration-primary/60 underline underline-offset-2 transition-colors",
+              className,
+            )}
             target={target ?? (external ? "_blank" : undefined)}
             rel={rel ?? (external ? "noopener noreferrer" : undefined)}
           />
@@ -67,7 +77,7 @@ export function MarkdownContent({
       rehypePlugins={rehypePlugins}
       components={components}
     >
-      {content}
+      {normalizedContent}
     </MessageResponse>
   );
 }

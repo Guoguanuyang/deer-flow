@@ -4,7 +4,20 @@ from pydantic import BaseModel, ConfigDict, Field
 class VolumeMountConfig(BaseModel):
     """Configuration for a volume mount."""
 
-    host_path: str = Field(..., description="Path on the host machine")
+    host_path: str = Field(
+        ...,
+        description=(
+            "Source path for the mount. Resolution depends on the active provider: "
+            "``LocalSandboxProvider`` checks this path from the gateway process — in "
+            "``make dev`` that is the host machine, but in Docker deployments "
+            "(``make up`` / docker-compose) it is the path *inside* the "
+            "``deer-flow-gateway`` container, so the host directory must also be "
+            "bind-mounted into the gateway service for the mount to take effect. "
+            "``AioSandboxProvider`` (DooD) passes this value straight to ``docker -v`` "
+            "for the sandbox container, where it is resolved by the host Docker daemon "
+            "from the host machine's perspective."
+        ),
+    )
     container_path: str = Field(..., description="Path inside the container")
     read_only: bool = Field(default=False, description="Whether the mount is read-only")
 
@@ -14,6 +27,8 @@ class SandboxConfig(BaseModel):
 
     Common options:
         use: Class path of the sandbox provider (required)
+        allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
+            Dangerous and intended only for fully trusted local workflows.
 
     AioSandboxProvider specific options:
         image: Docker image to use (default: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest)
@@ -28,6 +43,10 @@ class SandboxConfig(BaseModel):
     use: str = Field(
         ...,
         description="Class path of the sandbox provider (e.g. deerflow.sandbox.local:LocalSandboxProvider)",
+    )
+    allow_host_bash: bool = Field(
+        default=False,
+        description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
     )
     image: str | None = Field(
         default=None,
@@ -56,6 +75,22 @@ class SandboxConfig(BaseModel):
     environment: dict[str, str] = Field(
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
+    )
+
+    bash_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from bash tool output. Output exceeding this limit is middle-truncated (head + tail), preserving the first and last half. Set to 0 to disable truncation.",
+    )
+    read_file_output_max_chars: int = Field(
+        default=50000,
+        ge=0,
+        description="Maximum characters to keep from read_file tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
+    )
+    ls_output_max_chars: int = Field(
+        default=20000,
+        ge=0,
+        description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
 
     model_config = ConfigDict(extra="allow")

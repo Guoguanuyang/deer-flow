@@ -11,31 +11,26 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
                         │          Nginx (Port 2026)           │
                         │      Unified reverse proxy           │
                         └───────┬──────────────────┬───────────┘
-                                │                  │
-              /api/langgraph/*  │                  │  /api/* (other)
-                                ▼                  ▼
-               ┌────────────────────┐  ┌────────────────────────┐
-               │ LangGraph Server   │  │   Gateway API (8001)   │
-               │    (Port 2024)     │  │   FastAPI REST         │
-               │                    │  │                        │
-               │ ┌────────────────┐ │  │ Models, MCP, Skills,   │
-               │ │  Lead Agent    │ │  │ Memory, Uploads,       │
-               │ │  ┌──────────┐  │ │  │ Artifacts              │
-               │ │  │Middleware│  │ │  └────────────────────────┘
-               │ │  │  Chain   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │  Tools   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │Subagents │  │ │
-               │ │  └──────────┘  │ │
-               │ └────────────────┘ │
-               └────────────────────┘
+                                │
+            /api/langgraph/*    │    /api/* (other)
+            rewritten to /api/* │
+                                ▼
+               ┌────────────────────────────────────────┐
+               │        Gateway API (8001)              │
+               │        FastAPI REST + agent runtime    │
+               │                                        │
+               │ Models, MCP, Skills, Memory, Uploads,  │
+               │ Artifacts, Threads, Runs, Streaming    │
+               │                                        │
+               │ ┌────────────────────────────────────┐ │
+               │ │ Lead Agent                         │ │
+               │ │ Middleware Chain, Tools, Subagents │ │
+               │ └────────────────────────────────────┘ │
+               └────────────────────────────────────────┘
 ```
 
 **Request Routing** (via Nginx):
-- `/api/langgraph/*` → LangGraph Server - agent interactions, threads, streaming
+- `/api/langgraph/*` → Gateway LangGraph-compatible API - agent interactions, threads, streaming
 - `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 - `/` (non-API) → Frontend - Next.js web interface
 
@@ -74,17 +69,18 @@ Middlewares execute in strict order, each handling a specific concern:
 Per-thread isolated execution with virtual path translation:
 
 - **Abstract interface**: `execute_command`, `read_file`, `write_file`, `list_dir`
-- **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/)
+- **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/). Async runtime paths use async sandbox lifecycle hooks so startup, readiness polling, and release do not block the event loop. `AioSandboxProvider` validates active-cache and warm-pool containers during acquire/reuse, dropping definitively dead entries so a thread can provision a fresh sandbox after an unexpected container exit while keeping `get()` as an in-memory lookup. Backend health-check failures are treated as unknown, not dead, and a container that cannot be verified during discovery is simply not adopted (acquire falls through to create instead of failing).
 - **Virtual paths**: `/mnt/user-data/{workspace,uploads,outputs}` → thread-specific physical directories
 - **Skills path**: `/mnt/skills` → `deer-flow/skills/` directory
 - **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}` and preserves nested container paths
-- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace`
+- **File-write safety**: `str_replace` serializes read-modify-write per `(sandbox.id, path)` so isolated sandboxes keep concurrency even when virtual paths match
+- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`write_file` overwrites by default and exposes `append` for end-of-file writes; `bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
 
 ### Subagent System
 
 Async task delegation with concurrent execution:
 
-- **Built-in agents**: `general-purpose` (full toolset) and `bash` (command specialist)
+- **Built-in agents**: `general-purpose` (full toolset) and `bash` (command specialist, exposed only when shell access is available)
 - **Concurrency**: Max 3 subagents per turn, 15-minute timeout
 - **Execution**: Background thread pools with status tracking and SSE events
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
@@ -123,7 +119,7 @@ FastAPI application providing REST endpoints for frontend integration:
 | `POST /api/memory/reload` | Force memory reload |
 | `GET /api/memory/config` | Memory configuration |
 | `GET /api/memory/status` | Combined config + data |
-| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
+| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
@@ -192,7 +188,7 @@ export OPENAI_API_KEY="your-api-key-here"
 **Full Application** (from project root):
 
 ```bash
-make dev  # Starts LangGraph + Gateway + Frontend + Nginx
+make dev  # Starts Gateway + Frontend + Nginx
 ```
 
 Access at: http://localhost:2026
@@ -200,14 +196,11 @@ Access at: http://localhost:2026
 **Backend Only** (from backend directory):
 
 ```bash
-# Terminal 1: LangGraph server
+# Gateway API + embedded agent runtime
 make dev
-
-# Terminal 2: Gateway API
-make gateway
 ```
 
-Direct access: LangGraph at http://localhost:2024, Gateway at http://localhost:8001
+Direct access: Gateway at http://localhost:8001
 
 ---
 
@@ -243,11 +236,15 @@ backend/
 │   └── utils/                  # Utilities
 ├── docs/                       # Documentation
 ├── tests/                      # Test suite
-├── langgraph.json              # LangGraph server configuration
+├── langgraph.json              # LangGraph graph registry for tooling/Studio compatibility
 ├── pyproject.toml              # Python dependencies
 ├── Makefile                    # Development commands
 └── Dockerfile                  # Container build
 ```
+
+`langgraph.json` is not the default service entrypoint.  The scripts and Docker
+deployments run the Gateway embedded runtime; the file is kept for LangGraph
+tooling, Studio, or direct LangGraph Server compatibility.
 
 ---
 
@@ -312,6 +309,47 @@ MCP servers and skill states in a single file:
 - Model API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, etc.
 - Tool API keys: `TAVILY_API_KEY`, `GITHUB_TOKEN`, etc.
 
+### LangSmith Tracing
+
+DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, tool executions, and middleware processing are traced and visible in the LangSmith dashboard.
+
+**Setup:**
+
+1. Sign up at [smith.langchain.com](https://smith.langchain.com) and create a project.
+2. Add the following to your `.env` file in the project root:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+**Legacy variables:** The `LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`, and `LANGCHAIN_ENDPOINT` variables are also supported for backward compatibility. `LANGSMITH_*` variables take precedence when both are set.
+
+### Langfuse Tracing
+
+DeerFlow also supports [Langfuse](https://langfuse.com) observability for LangChain-compatible runs.
+
+Add the following to your `.env` file:
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+If you are using a self-hosted Langfuse deployment, set `LANGFUSE_BASE_URL` to your Langfuse host.
+
+### Dual Provider Behavior
+
+If both LangSmith and Langfuse are enabled, DeerFlow initializes and attaches both callbacks so the same run data is reported to both systems.
+
+If a provider is explicitly enabled but required credentials are missing, or the provider callback cannot be initialized, DeerFlow raises an error when tracing is initialized during model creation instead of silently disabling tracing.
+
+**Docker:** In `docker-compose.yaml`, tracing is disabled by default (`LANGSMITH_TRACING=false`). Set `LANGSMITH_TRACING=true` and/or `LANGFUSE_TRACING=true` in your `.env`, together with the required credentials, to enable tracing in containerized deployments.
+
 ---
 
 ## Development
@@ -320,10 +358,11 @@ MCP servers and skill states in a single file:
 
 ```bash
 make install    # Install dependencies
-make dev        # Run LangGraph server (port 2024)
-make gateway    # Run Gateway API (port 8001)
+make dev        # Run Gateway API + embedded agent runtime (port 8001)
+make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
+make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
 ```
 
 ### Code Style
@@ -339,6 +378,18 @@ make format     # Format code (ruff)
 ```bash
 uv run pytest
 ```
+
+`make detect-blocking-io` statically scans backend business code for blocking
+IO that may run on the backend event loop and is not test-coverage-bound. It
+prints a concise summary for human review and writes complete JSON findings to
+`.deer-flow/blocking-io-findings.json` at the repository root (regardless of
+whether the target is invoked from the repo root or from `backend/`). JSON
+findings include both broad IO category and review-oriented fields such as
+`priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
+`code`. `priority` is a deterministic review ordering from the operation type,
+not proof of a bug. Bare-name same-file calls are resolved by function name,
+so duplicate helper names in one file can conservatively over-report async
+reachability.
 
 ---
 

@@ -9,6 +9,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from deerflow.config.agents_api_config import AgentsApiConfig, get_agents_api_config, set_agents_api_config
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -164,6 +166,28 @@ class TestLoadAgentConfig:
 
         assert cfg.tool_groups == ["file:read", "file:write"]
 
+    def test_load_config_with_skills_empty_list(self, tmp_path):
+        config_dict = {"name": "no-skills-agent", "skills": []}
+        _write_agent(tmp_path, "no-skills-agent", config_dict)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("no-skills-agent")
+
+        assert cfg.skills == []
+
+    def test_load_config_with_skills_omitted(self, tmp_path):
+        config_dict = {"name": "default-skills-agent"}
+        _write_agent(tmp_path, "default-skills-agent", config_dict)
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("default-skills-agent")
+
+        assert cfg.skills is None
+
     def test_legacy_prompt_file_field_ignored(self, tmp_path):
         """Unknown fields like the old prompt_file should be silently ignored."""
         agent_dir = tmp_path / "agents" / "legacy-agent"
@@ -177,6 +201,79 @@ class TestLoadAgentConfig:
             cfg = load_agent_config("legacy-agent")
 
         assert cfg.name == "legacy-agent"
+
+
+# ===========================================================================
+# 3b. resolve_agent_dir — memory-only directory fallback (#3390)
+# ===========================================================================
+
+
+class TestResolveAgentDirMemoryOnlyFallback:
+    """Regression tests for #3390.
+
+    When memory is enabled, the first conversation creates a user-isolated
+    agent directory containing only ``memory.json`` (no ``config.yaml``).
+    On the next turn ``resolve_agent_dir`` must fall through to the legacy
+    shared layout instead of returning the incomplete user directory.
+    """
+
+    def test_user_dir_with_only_memory_falls_back_to_legacy(self, tmp_path):
+        """User dir has memory.json but no config.yaml → use legacy dir."""
+        from deerflow.config.agents_config import resolve_agent_dir
+
+        # Legacy agent with full config
+        legacy_dir = tmp_path / "agents" / "my-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: my-agent\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+        # User dir created by memory write — no config.yaml
+        user_dir = tmp_path / "users" / "u1" / "agents" / "my-agent"
+        user_dir.mkdir(parents=True)
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)), patch("deerflow.config.agents_config.get_effective_user_id", return_value="u1"):
+            result = resolve_agent_dir("my-agent", user_id="u1")
+
+        assert result == legacy_dir
+
+    def test_user_dir_with_config_takes_priority(self, tmp_path):
+        """User dir with config.yaml should still win over legacy."""
+        from deerflow.config.agents_config import resolve_agent_dir
+
+        # Legacy
+        legacy_dir = tmp_path / "agents" / "my-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: my-agent\n", encoding="utf-8")
+
+        # User dir with full config (migrated)
+        user_dir = tmp_path / "users" / "u1" / "agents" / "my-agent"
+        user_dir.mkdir(parents=True)
+        (user_dir / "config.yaml").write_text("name: my-agent\nmodel: gpt-4\n", encoding="utf-8")
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)), patch("deerflow.config.agents_config.get_effective_user_id", return_value="u1"):
+            result = resolve_agent_dir("my-agent", user_id="u1")
+
+        assert result == user_dir
+
+    def test_load_config_falls_back_when_user_dir_is_memory_only(self, tmp_path):
+        """End-to-end: load_agent_config works when user dir only has memory.json."""
+        config_dict = {"name": "my-agent", "description": "Legacy agent", "model": "deepseek-v3"}
+        _write_agent(tmp_path, "my-agent", config_dict)
+
+        # Simulate memory write creating user dir without config
+        user_dir = tmp_path / "users" / "u1" / "agents" / "my-agent"
+        user_dir.mkdir(parents=True)
+        (user_dir / "memory.json").write_text("{}", encoding="utf-8")
+
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)), patch("deerflow.config.agents_config.get_effective_user_id", return_value="u1"):
+            from deerflow.config.agents_config import load_agent_config
+
+            cfg = load_agent_config("my-agent", user_id="u1")
+
+        assert cfg.name == "my-agent"
+        assert cfg.model == "deepseek-v3"
 
 
 # ===========================================================================
@@ -304,39 +401,42 @@ class TestListCustomAgents:
 class TestMemoryFilePath:
     def test_global_memory_path(self, tmp_path):
         """None agent_name should return global memory file."""
-        import deerflow.agents.memory.updater as updater_mod
+        from deerflow.agents.memory.storage import FileMemoryStorage
         from deerflow.config.memory_config import MemoryConfig
 
         with (
-            patch("deerflow.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
         ):
-            path = updater_mod._get_memory_file_path(None)
+            storage = FileMemoryStorage()
+            path = storage._get_memory_file_path(None)
         assert path == tmp_path / "memory.json"
 
     def test_agent_memory_path(self, tmp_path):
         """Providing agent_name should return per-agent memory file."""
-        import deerflow.agents.memory.updater as updater_mod
+        from deerflow.agents.memory.storage import FileMemoryStorage
         from deerflow.config.memory_config import MemoryConfig
 
         with (
-            patch("deerflow.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
         ):
-            path = updater_mod._get_memory_file_path("code-reviewer")
+            storage = FileMemoryStorage()
+            path = storage._get_memory_file_path("code-reviewer")
         assert path == tmp_path / "agents" / "code-reviewer" / "memory.json"
 
     def test_different_paths_for_different_agents(self, tmp_path):
-        import deerflow.agents.memory.updater as updater_mod
+        from deerflow.agents.memory.storage import FileMemoryStorage
         from deerflow.config.memory_config import MemoryConfig
 
         with (
-            patch("deerflow.agents.memory.updater.get_paths", return_value=_make_paths(tmp_path)),
-            patch("deerflow.agents.memory.updater.get_memory_config", return_value=MemoryConfig(storage_path="")),
+            patch("deerflow.agents.memory.storage.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.agents.memory.storage.get_memory_config", return_value=MemoryConfig(storage_path="")),
         ):
-            path_global = updater_mod._get_memory_file_path(None)
-            path_a = updater_mod._get_memory_file_path("agent-a")
-            path_b = updater_mod._get_memory_file_path("agent-b")
+            storage = FileMemoryStorage()
+            path_global = storage._get_memory_file_path(None)
+            path_a = storage._get_memory_file_path("agent-a")
+            path_b = storage._get_memory_file_path("agent-b")
 
         assert path_global != path_a
         assert path_global != path_b
@@ -362,13 +462,38 @@ def _make_test_app(tmp_path: Path):
 @pytest.fixture()
 def agent_client(tmp_path):
     """TestClient with agents router, using tmp_path as base_dir."""
-    paths_instance = _make_paths(tmp_path)
+    import app.gateway.routers.agents as agents_router
 
-    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch("app.gateway.routers.agents.get_paths", return_value=paths_instance):
-        app = _make_test_app(tmp_path)
-        with TestClient(app) as client:
-            client._tmp_path = tmp_path  # type: ignore[attr-defined]
-            yield client
+    paths_instance = _make_paths(tmp_path)
+    previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+
+    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+        set_agents_api_config(AgentsApiConfig(enabled=True))
+        try:
+            app = _make_test_app(tmp_path)
+            with TestClient(app) as client:
+                client._tmp_path = tmp_path  # type: ignore[attr-defined]
+                yield client
+        finally:
+            set_agents_api_config(previous_config)
+
+
+@pytest.fixture()
+def disabled_agent_client(tmp_path):
+    """TestClient with agents router while the management API is disabled."""
+    import app.gateway.routers.agents as agents_router
+
+    paths_instance = _make_paths(tmp_path)
+    previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
+
+    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+        set_agents_api_config(AgentsApiConfig(enabled=False))
+        try:
+            app = _make_test_app(tmp_path)
+            with TestClient(app) as client:
+                yield client
+        finally:
+            set_agents_api_config(previous_config)
 
 
 class TestAgentsAPI:
@@ -413,6 +538,15 @@ class TestAgentsAPI:
         names = [a["name"] for a in response.json()["agents"]]
         assert "agent-one" in names
         assert "agent-two" in names
+
+    def test_list_agents_includes_soul(self, agent_client):
+        agent_client.post("/api/agents", json={"name": "soul-agent", "soul": "My soul content"})
+
+        response = agent_client.get("/api/agents")
+        assert response.status_code == 200
+        agents = response.json()["agents"]
+        soul_agent = next(a for a in agents if a["name"] == "soul-agent")
+        assert soul_agent["soul"] == "My soul content"
 
     def test_get_agent(self, agent_client):
         agent_client.post("/api/agents", json={"name": "test-agent", "soul": "Hello world"})
@@ -476,7 +610,10 @@ class TestAgentsAPI:
     def test_create_persists_files_on_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "disk-check", "soul": "disk soul"})
 
-        agent_dir = tmp_path / "agents" / "disk-check"
+        # tests/conftest.py installs an autouse fixture that sets the
+        # contextvar to "test-user-autouse", so the agent is persisted under
+        # users/test-user-autouse/agents/ rather than the legacy shared dir.
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "disk-check"
         assert agent_dir.exists()
         assert (agent_dir / "config.yaml").exists()
         assert (agent_dir / "SOUL.md").exists()
@@ -484,11 +621,22 @@ class TestAgentsAPI:
 
     def test_delete_removes_files_from_disk(self, agent_client, tmp_path):
         agent_client.post("/api/agents", json={"name": "remove-me", "soul": "bye"})
-        agent_dir = tmp_path / "agents" / "remove-me"
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "remove-me"
         assert agent_dir.exists()
 
         agent_client.delete("/api/agents/remove-me")
         assert not agent_dir.exists()
+
+    def test_create_rejects_legacy_name_collision(self, agent_client, tmp_path):
+        """An unmigrated legacy agent must still block name collision so that
+        running the migration script later won't shadow the legacy entry."""
+        legacy_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: legacy-agent\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("legacy soul", encoding="utf-8")
+
+        response = agent_client.post("/api/agents", json={"name": "legacy-agent", "soul": "x"})
+        assert response.status_code == 409
 
 
 # ===========================================================================
@@ -525,3 +673,37 @@ class TestUserProfileAPI:
         response = agent_client.put("/api/user-profile", json={"content": ""})
         assert response.status_code == 200
         assert response.json()["content"] is None
+
+
+class TestAgentsApiDisabled:
+    def test_agents_list_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents")
+        assert response.status_code == 403
+        assert "agents_api.enabled=true" in response.json()["detail"]
+
+    def test_agent_get_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/example-agent")
+        assert response.status_code == 403
+
+    def test_agent_name_check_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/check", params={"name": "example-agent"})
+        assert response.status_code == 403
+
+    def test_agent_create_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.post("/api/agents", json={"name": "example-agent", "soul": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_update_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.put("/api/agents/example-agent", json={"description": "blocked"})
+        assert response.status_code == 403
+
+    def test_agent_delete_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.delete("/api/agents/example-agent")
+        assert response.status_code == 403
+
+    def test_user_profile_routes_return_403(self, disabled_agent_client):
+        get_response = disabled_agent_client.get("/api/user-profile")
+        put_response = disabled_agent_client.put("/api/user-profile", json={"content": "blocked"})
+
+        assert get_response.status_code == 403
+        assert put_response.status_code == 403

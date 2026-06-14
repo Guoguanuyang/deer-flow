@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | 日本語 | [Français](./README_fr.md)
+[English](./README.md) | [中文](./README_zh.md) | 日本語 | [Français](./README_fr.md) | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -58,6 +58,7 @@ DeerFlowは、BytePlusが独自に開発したインテリジェント検索・�
       - [サンドボックスモード](#サンドボックスモード)
       - [MCPサーバー](#mcpサーバー)
       - [IMチャネル](#imチャネル)
+      - [LangSmithトレーシング](#langsmithトレーシング)
   - [Deep Researchからスーパーエージェントハーネスへ](#deep-researchからスーパーエージェントハーネスへ)
   - [コア機能](#コア機能)
     - [スキルとツール](#スキルとツール)
@@ -180,7 +181,7 @@ make down   # コンテナを停止して削除
 ```
 
 > [!NOTE]
-> LangGraphエージェントサーバーは現在`langgraph dev`（オープンソースCLIサーバー）経由で実行されます。
+> Agentランタイムは現在Gateway内で実行されます。`/api/langgraph/*`はnginxによってGatewayのLangGraph-compatible APIへ書き換えられます。
 
 アクセス: http://localhost:2026
 
@@ -242,13 +243,14 @@ DeerFlowはメッセージングアプリからのタスク受信をサポート
 | Telegram | Bot API（ロングポーリング） | 簡単 |
 | Slack | Socket Mode | 中程度 |
 | Feishu / Lark | WebSocket | 中程度 |
+| DingTalk | Stream Push（WebSocket） | 中程度 |
 
 **`config.yaml`での設定：**
 
 ```yaml
 channels:
-  # LangGraphサーバーURL（デフォルト: http://localhost:2024）
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL（デフォルト: http://localhost:8001/api）
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL（デフォルト: http://localhost:8001）
   gateway_url: http://localhost:8001
 
@@ -266,6 +268,8 @@ channels:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
+    # domain: https://open.feishu.cn       # China (default)
+    # domain: https://open.larksuite.com   # International
 
   slack:
     enabled: true
@@ -291,6 +295,13 @@ channels:
           context:
             thinking_enabled: true
             subagent_enabled: true
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # DingTalk Open PlatformのClientId
+    client_secret: $DINGTALK_CLIENT_SECRET     # DingTalk Open PlatformのClientSecret
+    allowed_users: []                          # 空 = 全員許可
+    card_template_id: ""                       # オプション：ストリーミングタイプライター効果用のAIカードテンプレートID
 ```
 
 対応するAPIキーを`.env`ファイルに設定します：
@@ -306,6 +317,10 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# DingTalk
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Telegramのセットアップ**
@@ -328,6 +343,13 @@ FEISHU_APP_SECRET=your_app_secret
 3. **イベント**で`im.message.receive_v1`を購読し、**ロングコネクション**モードを選択。
 4. App IDとApp Secretをコピー。`.env`に`FEISHU_APP_ID`と`FEISHU_APP_SECRET`を設定し、`config.yaml`でチャネルを有効にします。
 
+**DingTalkのセットアップ**
+
+1. [DingTalk Open Platform](https://open.dingtalk.com/)でアプリを作成し、**ロボット**機能を有効化します。
+2. ロボット設定ページでメッセージ受信モードを**Streamモード**に設定します。
+3. `Client ID`と`Client Secret`をコピー。`.env`に`DINGTALK_CLIENT_ID`と`DINGTALK_CLIENT_SECRET`を設定し、`config.yaml`でチャネルを有効にします。
+4. *（オプション）* ストリーミングAIカード返信（タイプライター効果）を有効にするには、[DingTalkカードプラットフォーム](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card)で**AIカード**テンプレートを作成し、`config.yaml`の`card_template_id`にテンプレートIDを設定します。`Card.Streaming.Write` および `Card.Instance.Write` 権限の申請も必要です。
+
 **コマンド**
 
 チャネル接続後、チャットから直接DeerFlowと対話できます：
@@ -341,6 +363,21 @@ FEISHU_APP_SECRET=your_app_secret
 | `/help` | ヘルプを表示 |
 
 > コマンドプレフィックスのないメッセージは通常のチャットとして扱われ、DeerFlowがスレッドを作成して会話形式で応答します。
+
+#### LangSmithトレーシング
+
+DeerFlowには[LangSmith](https://smith.langchain.com)による可観測性が組み込まれています。有効にすると、すべてのLLM呼び出し、エージェント実行、ツール実行がトレースされ、LangSmithダッシュボードで確認できます。
+
+`.env`ファイルに以下を追加します：
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+Dockerデプロイでは、トレーシングはデフォルトで無効です。`.env`で`LANGSMITH_TRACING=true`と`LANGSMITH_API_KEY`を設定して有効にします。
 
 ## Deep Researchからスーパーエージェントハーネスへ
 

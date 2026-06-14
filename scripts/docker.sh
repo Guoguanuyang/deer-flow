@@ -15,6 +15,32 @@ DOCKER_DIR="$PROJECT_ROOT/docker"
 # Docker Compose command with project name
 COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
 
+load_proxy_env_from_dotenv() {
+    local env_file="$PROJECT_ROOT/.env"
+    local var
+    local line
+    local value
+
+    if [ ! -f "$env_file" ]; then
+        return
+    fi
+
+    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+        if [ -z "${!var+x}" ]; then
+            line="$(grep -E "^[[:space:]]*${var}=" "$env_file" | tail -n 1 || true)"
+            if [ -n "$line" ]; then
+                value="${line#*=}"
+                value="${value%\"}"
+                value="${value#\"}"
+                value="${value%\'}"
+                value="${value#\'}"
+                value="${value%$'\r'}"
+                export "${var}=${value}"
+            fi
+        fi
+    done
+}
+
 detect_sandbox_mode() {
     local config_file="$PROJECT_ROOT/config.yaml"
     local sandbox_use=""
@@ -152,6 +178,12 @@ start() {
     local sandbox_mode
     local services
 
+    if [ "$#" -gt 0 ]; then
+        echo -e "${YELLOW}Unknown option for start: $1${NC}"
+        echo "Usage: $0 start"
+        exit 1
+    fi
+
     echo "=========================================="
     echo "  Starting DeerFlow Docker Development"
     echo "=========================================="
@@ -159,12 +191,26 @@ start() {
 
     sandbox_mode="$(detect_sandbox_mode)"
 
+    services="frontend gateway nginx"
     if [ "$sandbox_mode" = "provisioner" ]; then
-        services="frontend gateway langgraph provisioner nginx"
-    else
-        services="frontend gateway langgraph nginx"
+        services="frontend gateway provisioner nginx"
     fi
 
+    # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
+    # Docker socket. Mount it via the opt-in docker-compose.dood.yaml overlay so
+    # the default (local) and provisioner modes never expose the host daemon.
+    # Mounting the socket = root-equivalent host control; see SECURITY.md.
+    if [ "$sandbox_mode" = "aio" ]; then
+        local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
+        if [ ! -S "$docker_socket" ]; then
+            echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
+            exit 1
+        fi
+        echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+        COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
+    fi
+
+    echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
     echo -e "${BLUE}Detected sandbox mode: $sandbox_mode${NC}"
     if [ "$sandbox_mode" = "provisioner" ]; then
         echo -e "${BLUE}Provisioner enabled (Kubernetes mode).${NC}"
@@ -191,6 +237,7 @@ start() {
             echo -e "${YELLOW}  configuration before starting DeerFlow.                  ${NC}"
             echo -e "${YELLOW}============================================================${NC}"
             echo ""
+            echo -e "${YELLOW}  Recommended: run 'make setup' before starting Docker.    ${NC}"
             echo -e "${YELLOW}  Edit the file:  $PROJECT_ROOT/config.yaml${NC}"
             echo -e "${YELLOW}  Then run:        make docker-start${NC}"
             echo ""
@@ -213,6 +260,8 @@ start() {
         fi
     fi
 
+    load_proxy_env_from_dotenv
+
     echo "Building and starting containers..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD up --build -d --remove-orphans $services
     echo ""
@@ -222,7 +271,8 @@ start() {
     echo ""
     echo "  🌐 Application: http://localhost:2026"
     echo "  📡 API Gateway: http://localhost:2026/api/*"
-    echo "  🤖 LangGraph:   http://localhost:2026/api/langgraph/*"
+    echo "  🤖 Runtime:     Gateway embedded"
+    echo "  API:            /api/langgraph/* → Gateway"
     echo ""
     echo "  📋 View logs: make docker-logs"
     echo "  🛑 Stop:      make docker-stop"
@@ -300,9 +350,9 @@ help() {
     echo "Usage: $0 <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  init          - Pull the sandbox image (speeds up first Pod startup)"
-    echo "  start         - Start Docker services (auto-detects sandbox mode from config.yaml)"
-    echo "  restart       - Restart all running Docker services"
+    echo "  init              - Pull the sandbox image (speeds up first Pod startup)"
+    echo "  start             - Start Docker services (auto-detects sandbox mode from config.yaml)"
+    echo "  restart           - Restart all running Docker services"
     echo "  logs [option] - View Docker development logs"
     echo "                  --frontend   View frontend logs only"
     echo "                  --gateway    View gateway logs only"
@@ -320,7 +370,8 @@ main() {
             init
             ;;
         start)
-            start
+            shift
+            start "$@"
             ;;
         restart)
             restart

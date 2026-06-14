@@ -1,19 +1,19 @@
 """Middleware for injecting image details into conversation before LLM call."""
 
-from typing import NotRequired, override
+import logging
+from typing import override
 
-from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.thread_state import ViewedImageData
+from deerflow.agents.thread_state import ThreadState
+
+logger = logging.getLogger(__name__)
 
 
-class ViewImageMiddlewareState(AgentState):
-    """Compatible with the `ThreadState` schema."""
-
-    viewed_images: NotRequired[dict[str, ViewedImageData] | None]
+class ViewImageMiddlewareState(ThreadState):
+    """Reuse the thread state so reducer-backed keys keep their annotations."""
 
 
 class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
@@ -102,7 +102,8 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         """
         viewed_images = state.get("viewed_images", {})
         if not viewed_images:
-            return ["No images have been viewed."]
+            # Return a properly formatted text block, not a plain string array
+            return [{"type": "text", "text": "No images have been viewed."}]
 
         # Build the message with image information
         content_blocks: list[str | dict] = [{"type": "text", "text": "Here are the images you've viewed:"}]
@@ -178,10 +179,12 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         # Create the image details message with text and image content
         image_content = self._create_image_details_message(state)
 
-        # Create a new human message with mixed content (text + images)
-        human_msg = HumanMessage(content=image_content)
+        # Create a new human message with mixed content (text + images). This is
+        # internal context for the model only, so hide it from the chat UI and IM
+        # channels (matches the other middleware-injected context messages).
+        human_msg = HumanMessage(content=image_content, additional_kwargs={"hide_from_ui": True})
 
-        print("[ViewImageMiddleware] Injecting image details message with images before LLM call")
+        logger.debug("Injecting image details message with images before LLM call")
 
         # Return state update with the new message
         return {"messages": [human_msg]}

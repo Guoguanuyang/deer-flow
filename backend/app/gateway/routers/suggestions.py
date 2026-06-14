@@ -1,9 +1,14 @@
 import json
 import logging
+import re
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
+from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_config
+from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -26,6 +31,31 @@ class SuggestionsResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list, description="Suggested follow-up questions")
 
 
+# Matches a complete <think>...</think> block (case-insensitive, spans newlines).
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
+# Matches a dangling, unclosed <think> (model truncated at max_tokens mid-thought).
+_OPEN_THINK_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Remove reasoning-model ``<think>...</think>`` blocks from the response.
+
+    Reasoning models such as MiniMax-M3 inline their chain-of-thought into the
+    message ``content`` wrapped in ``<think>...</think>`` (``reasoning_split``
+    defaults to false), rather than exposing a separate ``reasoning_content``
+    field. The thinking text frequently contains ``[`` / ``]`` characters, which
+    corrupted the downstream ``find('[')`` / ``rfind(']')`` JSON extraction and
+    produced empty suggestions. We strip the reasoning before parsing so only
+    the actual answer remains.
+    """
+    text = _THINK_BLOCK_RE.sub("", text)
+    # Drop any unclosed <think> (and everything after it) left by truncation.
+    open_match = _OPEN_THINK_RE.search(text)
+    if open_match:
+        text = text[: open_match.start()]
+    return text.strip()
+
+
 def _strip_markdown_code_fence(text: str) -> str:
     stripped = text.strip()
     if not stripped.startswith("```"):
@@ -37,7 +67,8 @@ def _strip_markdown_code_fence(text: str) -> str:
 
 
 def _parse_json_string_list(text: str) -> list[str] | None:
-    candidate = _strip_markdown_code_fence(text)
+    candidate = _strip_think_blocks(text)
+    candidate = _strip_markdown_code_fence(candidate)
     start = candidate.find("[")
     end = candidate.rfind("]")
     if start == -1 or end == -1 or end <= start:
@@ -97,31 +128,36 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     summary="Generate Follow-up Questions",
     description="Generate short follow-up questions a user might ask next, based on recent conversation context.",
 )
-async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> SuggestionsResponse:
-    if not request.messages:
+@require_permission("threads", "read", owner_check=True)
+async def generate_suggestions(
+    thread_id: str,
+    body: SuggestionsRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SuggestionsResponse:
+    if not body.messages:
         return SuggestionsResponse(suggestions=[])
 
-    n = request.n
-    conversation = _format_conversation(request.messages)
+    n = body.n
+    conversation = _format_conversation(body.messages)
     if not conversation:
         return SuggestionsResponse(suggestions=[])
 
-    prompt = (
+    system_instruction = (
         "You are generating follow-up questions to help the user continue the conversation.\n"
         f"Based on the conversation below, produce EXACTLY {n} short questions the user might ask next.\n"
         "Requirements:\n"
-        "- Questions must be relevant to the conversation.\n"
+        "- Questions must be relevant to the preceding conversation.\n"
         "- Questions must be written in the same language as the user.\n"
         "- Keep each question concise (ideally <= 20 words / <= 40 Chinese characters).\n"
         "- Do NOT include numbering, markdown, or any extra text.\n"
-        "- Output MUST be a JSON array of strings only.\n\n"
-        "Conversation:\n"
-        f"{conversation}\n"
+        "- Output MUST be a JSON array of strings only.\n"
     )
+    user_content = f"Conversation Context:\n{conversation}\n\nGenerate {n} follow-up questions"
 
     try:
-        model = create_chat_model(name=request.model_name, thinking_enabled=False)
-        response = model.invoke(prompt)
+        model = create_chat_model(name=body.model_name, thinking_enabled=False, app_config=config)
+        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config={"run_name": "suggest_agent"})
         raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []
         cleaned = [s.replace("\n", " ").strip() for s in suggestions if s.strip()]

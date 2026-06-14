@@ -2,6 +2,7 @@
  * API functions for file uploads
  */
 
+import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 
 export interface UploadedFileInfo {
@@ -22,6 +23,7 @@ export interface UploadResponse {
   success: boolean;
   files: UploadedFileInfo[];
   message: string;
+  skipped_files: string[];
 }
 
 export interface ListFilesResponse {
@@ -33,9 +35,7 @@ async function readErrorDetail(
   response: Response,
   fallback: string,
 ): Promise<string> {
-  const error = await response
-    .json()
-    .catch(() => ({ detail: fallback }));
+  const error = await response.json().catch(() => ({ detail: fallback }));
   return error.detail ?? fallback;
 }
 

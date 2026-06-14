@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -58,6 +58,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
       - [Mode Sandbox](#mode-sandbox)
       - [Serveur MCP](#serveur-mcp)
       - [Canaux de messagerie](#canaux-de-messagerie)
+      - [Traçage LangSmith](#traçage-langsmith)
   - [Du Deep Research au Super Agent Harness](#du-deep-research-au-super-agent-harness)
   - [Fonctionnalités principales](#fonctionnalités-principales)
     - [Skills et outils](#skills-et-outils)
@@ -227,7 +228,7 @@ make down   # Stop and remove containers
 ```
 
 > [!NOTE]
-> Le serveur d'agents LangGraph fonctionne actuellement via `langgraph dev` (le serveur CLI open source).
+> Le runtime d'agent s'exécute actuellement dans la Gateway. nginx réécrit `/api/langgraph/*` vers l'API compatible LangGraph servie par la Gateway.
 
 Accès : http://localhost:2026
 
@@ -289,13 +290,14 @@ DeerFlow peut recevoir des tâches depuis des applications de messagerie. Les ca
 | Telegram | Bot API (long-polling) | Facile |
 | Slack | Socket Mode | Modérée |
 | Feishu / Lark | WebSocket | Modérée |
+| DingTalk | Stream Push (WebSocket) | Modérée |
 
 **Configuration dans `config.yaml` :**
 
 ```yaml
 channels:
-  # LangGraph Server URL (default: http://localhost:2024)
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 
@@ -313,6 +315,8 @@ channels:
     enabled: true
     app_id: $FEISHU_APP_ID
     app_secret: $FEISHU_APP_SECRET
+    # domain: https://open.feishu.cn       # China (default)
+    # domain: https://open.larksuite.com   # International
 
   slack:
     enabled: true
@@ -338,6 +342,13 @@ channels:
           context:
             thinking_enabled: true
             subagent_enabled: true
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # ClientId depuis DingTalk Open Platform
+    client_secret: $DINGTALK_CLIENT_SECRET     # ClientSecret depuis DingTalk Open Platform
+    allowed_users: []                          # vide = tout le monde autorisé
+    card_template_id: ""                       # Optionnel : ID de modèle AI Card pour l'effet machine à écrire en streaming
 ```
 
 Définissez les clés API correspondantes dans votre fichier `.env` :
@@ -353,6 +364,10 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# DingTalk
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Configuration Telegram**
@@ -375,6 +390,13 @@ FEISHU_APP_SECRET=your_app_secret
 3. Dans **Events**, abonnez-vous à `im.message.receive_v1` et sélectionnez le mode **Long Connection**.
 4. Copiez l'App ID et l'App Secret. Définissez `FEISHU_APP_ID` et `FEISHU_APP_SECRET` dans `.env` et activez le canal dans `config.yaml`.
 
+**Configuration DingTalk**
+
+1. Créez une application sur [DingTalk Open Platform](https://open.dingtalk.com/) et activez la capacité **Robot**.
+2. Dans la page de configuration du robot, définissez le mode de réception des messages sur **Stream**.
+3. Copiez le `Client ID` et le `Client Secret`. Définissez `DINGTALK_CLIENT_ID` et `DINGTALK_CLIENT_SECRET` dans `.env` et activez le canal dans `config.yaml`.
+4. *(Optionnel)* Pour activer les réponses en streaming AI Card (effet machine à écrire), créez un modèle **AI Card** sur la [plateforme de cartes DingTalk](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), puis définissez `card_template_id` dans `config.yaml` avec l'ID du modèle. Vous devez également demander les permissions `Card.Streaming.Write` et `Card.Instance.Write`.
+
 **Commandes**
 
 Une fois un canal connecté, vous pouvez interagir avec DeerFlow directement depuis le chat :
@@ -388,6 +410,21 @@ Une fois un canal connecté, vous pouvez interagir avec DeerFlow directement dep
 | `/help` | Afficher l'aide |
 
 > Les messages sans préfixe de commande sont traités comme du chat classique — DeerFlow crée un thread et répond de manière conversationnelle.
+
+#### Traçage LangSmith
+
+DeerFlow intègre nativement [LangSmith](https://smith.langchain.com) pour l'observabilité. Une fois activé, tous les appels LLM, les exécutions d'agents et les exécutions d'outils sont tracés et visibles dans le tableau de bord LangSmith.
+
+Ajoutez les lignes suivantes à votre fichier `.env` :
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
+LANGSMITH_PROJECT=xxx
+```
+
+Pour les déploiements Docker, le traçage est désactivé par défaut. Définissez `LANGSMITH_TRACING=true` et `LANGSMITH_API_KEY` dans votre `.env` pour l'activer.
 
 ## Du Deep Research au Super Agent Harness
 
